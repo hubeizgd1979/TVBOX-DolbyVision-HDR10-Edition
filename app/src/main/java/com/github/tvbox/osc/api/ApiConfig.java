@@ -6,6 +6,7 @@ import android.app.Activity;
 import android.net.Uri;
 import android.text.TextUtils;
 import android.util.Base64;
+import android.util.Log;
 
 import com.github.catvod.crawler.JarLoader;
 import com.github.catvod.crawler.JsLoader;
@@ -31,7 +32,6 @@ import com.github.tvbox.osc.util.MD5;
 import com.github.tvbox.osc.util.OkGoHelper;
 import com.github.tvbox.osc.util.StorageBudgetManager;
 import com.github.tvbox.osc.util.VideoParseRuler;
-import com.github.tvbox.osc.util.live.TxtSubscribe;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -87,8 +87,6 @@ public class ApiConfig {
 
     private final String requestAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9";
 
-    private static final String DEFAULT_LIVE_OBJ_TEMPLATE = "{\"lives\":[{\"name\":\"txt_m3u\",\"type\":0,\"url\":\"txt_m3u_url\"}]}";
-
     /**
      * Keep network/configuration artifacts in the app cache tree so the shared
      * storage budget can rotate them. Older releases wrote these files directly
@@ -121,8 +119,13 @@ public class ApiConfig {
         parseBeanList = new ArrayList<>();
         searchSourceBeanList = new ArrayList<>();
         gson = new Gson();
-        Hawk.put(HawkConfig.LIVE_GROUP_LIST,new JsonArray());
+        // This singleton is process-local. Constructing it in :player must not erase
+        // the live groups just loaded/saved by the main process.
         loadDefaultConfig();
+        // The player runs in :player and owns a separate ApiConfig singleton. Build the
+        // settings model there as well so LivePlayActivity remains usable when no remote
+        // configuration or live source has been loaded yet.
+        initLiveSettings();
     }
 
     public static ApiConfig get() {
@@ -177,6 +180,7 @@ public class ApiConfig {
     private String TempKey = null;
     private String configUrl(String apiUrl){
         String configUrl = "", pk = ";pk;";
+        TempKey = null;
         apiUrl=apiUrl.replace("file://", "clan://localhost/");
         if (apiUrl.contains(pk)) {
             String[] a = apiUrl.split(pk);
@@ -220,21 +224,35 @@ public class ApiConfig {
         initLiveSettings();
     }
 
-    private void loadIndependentLiveConfig(String liveApiUrl, boolean useCache,
-                                           LoadConfigCallback callback, Runnable onComplete) {
-        final String liveApiConfigUrl = configUrl(liveApiUrl);
-        if (isDirectLiveUrl(liveApiUrl)) {
-            try {
-                initLiveSettings();
-                parseLiveJson(liveApiUrl, wrapDirectLiveConfig(liveApiConfigUrl));
-            } catch (Throwable th) {
-                th.printStackTrace();
-                callback.notice("解析直播配置失败");
-            }
-            onComplete.run();
+    /** Loads live configuration in the process that owns live playback, independently of VOD. */
+    public void loadLiveConfig(String mainApiUrl, String independentLiveUrl,
+                               Object requestTag, LoadConfigCallback callback) {
+        resetLiveConfig();
+        final String selected = com.github.tvbox.osc.util.live.LiveSourcePolicy.resolveUrl(
+                mainApiUrl, independentLiveUrl);
+        if (selected.isEmpty()) {
+            callback.error("尚未设置直播源，请在设置中填写直播地址");
             return;
         }
+        loadIndependentLiveConfig(selected, false, callback, () -> {
+            if (liveChannelGroupList.isEmpty()) {
+                callback.error("直播源未返回可用频道，请检查地址和网络");
+            } else {
+                callback.success();
+            }
+        }, requestTag);
+    }
 
+    private void loadIndependentLiveConfig(String liveApiUrl, boolean useCache,
+                                           LoadConfigCallback callback, Runnable onComplete) {
+        loadIndependentLiveConfig(liveApiUrl, useCache, callback, onComplete, null);
+    }
+
+    private void loadIndependentLiveConfig(String liveApiUrl, boolean useCache,
+                                           LoadConfigCallback callback, Runnable onComplete,
+                                           Object requestTag) {
+        final String liveApiConfigUrl = configUrl(liveApiUrl);
+        final String liveKey = TempKey;
         final File liveCache = apiCacheFile(MD5.encode(liveApiUrl));
         final File liveReadableCache = readableCacheFile(MD5.encode(liveApiUrl));
         if (useCache && liveReadableCache.exists()) {
@@ -249,13 +267,14 @@ public class ApiConfig {
 
         LOG.i("echo-加载独立直播");
         OkGo.<String>get(liveApiConfigUrl)
+                .tag(requestTag)
                 .headers("User-Agent", userAgent)
                 .headers("Accept", requestAccept)
                 .execute(new AbsCallback<String>() {
                     @Override
                     public void onSuccess(Response<String> response) {
                         try {
-                            String normalized = normalizeLiveConfigContent(liveApiUrl,
+                            String normalized = com.github.tvbox.osc.util.live.LiveConfigContent.normalize(
                                     liveApiConfigUrl, response.body());
                             parseLiveJson(liveApiUrl, normalized);
                             FileUtils.saveCache(liveCache, normalized);
@@ -282,7 +301,7 @@ public class ApiConfig {
                         if (response.body() == null) {
                             return "";
                         }
-                        String result = FindResult(response.body().string(), TempKey);
+                        String result = FindResult(response.body().string(), liveKey);
                         if (liveApiUrl.startsWith("clan")) {
                             result = clanContentFix(clanToAddress(liveApiUrl), result);
                         }
@@ -321,6 +340,8 @@ public class ApiConfig {
             }
         }
         String configUrl=configUrl(apiUrl);
+        final String mainKey = TempKey;
+        LOG.i("config-request host=" + configHost(configUrl) + " cache=" + useCache);
         // 使用内部存储，将当前配置地址写入到应用的私有目录中
         File configUrlFile = apiCacheFile("config_url");
         FileUtils.saveCache(configUrlFile,configUrl);
@@ -338,22 +359,31 @@ public class ApiConfig {
                             FileUtils.saveCache(cache,json);
                             callback.success();
                         } catch (Throwable th) {
-                            th.printStackTrace();
-                            callback.error("解析配置失败");
+                            String contentType = response.headers() == null ? "unknown"
+                                    : String.valueOf(response.headers().get("Content-Type"));
+                            String diagnostic = "parse host=" + configHost(configUrl)
+                                    + " status=" + response.code()
+                                    + " contentType=" + contentType
+                                    + " error=" + th.getClass().getSimpleName();
+                            LOG.e("config-" + diagnostic);
+                            Log.e("TVBox-Config", "config-" + diagnostic);
+                            if (!loadCachedMainConfig(apiUrl, readableCache, callback)) {
+                                callback.error("解析配置失败");
+                            }
                         }
                     }
 
                     @Override
                     public void onError(Response<String> response) {
                         super.onError(response);
-                        if (readableCache.exists()) {
-                            try {
-                                parseJson(apiUrl, readableCache);
-                                callback.success();
-                                return;
-                            } catch (Throwable th) {
-                                th.printStackTrace();
-                            }
+                        String diagnostic = "fetch-failed host=" + configHost(configUrl)
+                                + " status=" + response.code()
+                                + " error=" + (response.getException() == null ? "unknown"
+                                : response.getException().getClass().getSimpleName());
+                        LOG.e("config-" + diagnostic);
+                        Log.e("TVBox-Config", "config-" + diagnostic);
+                        if (loadCachedMainConfig(apiUrl, readableCache, callback)) {
+                            return;
                         }
                         callback.error("拉取配置失败\n" + (response.getException() != null ? response.getException().getMessage() : ""));
                     }
@@ -363,7 +393,7 @@ public class ApiConfig {
                         if (response.body() == null) {
                             result = "";
                         } else {
-                            result = FindResult(response.body().string(), TempKey);
+                            result = FindResult(response.body().string(), mainKey);
                         }
 
                         if (apiUrl.startsWith("clan")) {
@@ -374,6 +404,34 @@ public class ApiConfig {
                         return result;
                     }
                 });
+    }
+
+    private boolean loadCachedMainConfig(String apiUrl, File readableCache,
+                                         LoadConfigCallback callback) {
+        if (readableCache == null || !readableCache.exists()) {
+            return false;
+        }
+        try {
+            parseJson(apiUrl, readableCache);
+            LOG.i("config-cache-fallback success");
+            callback.success();
+            return true;
+        } catch (Throwable th) {
+            String diagnostic = "config-cache-fallback failed error="
+                    + th.getClass().getSimpleName();
+            LOG.e(diagnostic);
+            Log.e("TVBox-Config", diagnostic);
+            return false;
+        }
+    }
+
+    private static String configHost(String configUrl) {
+        try {
+            String host = Uri.parse(configUrl).getHost();
+            return TextUtils.isEmpty(host) ? "local-or-invalid" : host;
+        } catch (Throwable ignored) {
+            return "local-or-invalid";
+        }
     }
 
     public void loadJar(boolean useCache, String spider, LoadConfigCallback callback) {
@@ -992,63 +1050,6 @@ public class ApiConfig {
         }
     }
 
-    private boolean isDirectLiveUrl(String liveApiUrl) {
-        String url = liveApiUrl == null ? "" : liveApiUrl.toLowerCase().trim();
-        return url.contains(".txt")
-                || url.contains(".m3u")
-                || url.contains("=txt")
-                || url.contains("=m3u")
-                || url.contains("type=txt")
-                || url.contains("type=m3u")
-                || url.contains("format=txt")
-                || url.contains("format=m3u")
-                || url.contains("download")
-                || url.contains("live");
-    }
-
-    private String wrapDirectLiveConfig(String liveApiConfigUrl) {
-        return DEFAULT_LIVE_OBJ_TEMPLATE.replace("txt_m3u_url", liveApiConfigUrl);
-    }
-
-    private String normalizeLiveConfigContent(String liveApiUrl, String liveApiConfigUrl, String body) {
-        if (TextUtils.isEmpty(body)) {
-            return body;
-        }
-        String trimmed = body.replace("\ufeff", "").trim();
-        if (looksLikeLiveText(trimmed) && !looksLikeLiveJson(trimmed)) {
-            return wrapDirectLiveConfig(liveApiConfigUrl);
-        }
-        return trimmed;
-    }
-
-    private boolean looksLikeLiveJson(String body) {
-        if (TextUtils.isEmpty(body)) {
-            return false;
-        }
-        try {
-            JsonObject infoJson = gson.fromJson(body, JsonObject.class);
-            return infoJson != null && infoJson.has("lives");
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private boolean looksLikeLiveText(String body) {
-        if (TextUtils.isEmpty(body)) {
-            return false;
-        }
-        if (body.regionMatches(true, 0, "#EXTM3U", 0, 7)) {
-            return true;
-        }
-        LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>> linkedHashMap = new LinkedHashMap<>();
-        try {
-            TxtSubscribe.parse(linkedHashMap, body);
-            return !linkedHashMap.isEmpty();
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
     private String currentLiveSpider;
     public void setLiveJar(String liveJar)
     {
@@ -1122,6 +1123,18 @@ public class ApiConfig {
         if (!sourceBeanList.containsKey(key))
             return null;
         return sourceBeanList.get(key);
+    }
+
+    /**
+     * Register a source handed over by the UI process.  The full-screen player
+     * has its own ApiConfig singleton, so a source loaded from a remote config
+     * is otherwise invisible there and getPlay() would dereference null.
+     */
+    public void registerSource(SourceBean sourceBean) {
+        if (sourceBean == null || TextUtils.isEmpty(sourceBean.getKey())) {
+            return;
+        }
+        sourceBeanList.put(sourceBean.getKey(), sourceBean);
     }
 
     public void setSourceBean(SourceBean sourceBean) {

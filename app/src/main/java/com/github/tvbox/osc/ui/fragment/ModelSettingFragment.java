@@ -25,6 +25,8 @@ import com.github.tvbox.osc.base.BaseActivity;
 import com.github.tvbox.osc.base.BaseLazyFragment;
 import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.server.RemoteInputDrafts;
+import com.github.tvbox.osc.server.RemoteInputRequest;
 import com.github.tvbox.osc.player.thirdparty.RemoteTVBox;
 import com.github.tvbox.osc.ui.activity.HomeActivity;
 import com.github.tvbox.osc.ui.activity.SettingActivity;
@@ -89,6 +91,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
     private TextView tvApiHistorySummary;
     private TextView tvHdrSupport;
     private TextView tvWebDavSummary;
+    private AlertDialog webDavSettingsDialog;
+    private EditText webDavAddressInput;
+    private EditText webDavUsernameInput;
+    private EditText webDavPasswordInput;
 
     public static ModelSettingFragment newInstance() {
         return new ModelSettingFragment().setArguments();
@@ -249,7 +255,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
                             tvHomeApi.setText(ApiConfig.get().getHomeSourceBean().getName());
 
                             Intent intent =new Intent(mContext, HomeActivity.class);
-                            intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                            intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
                             Bundle bundle = new Bundle();
                             bundle.putBoolean("useCache", true);
                             intent.putExtras(bundle);
@@ -322,7 +328,6 @@ public class ModelSettingFragment extends BaseLazyFragment {
             public void onClick(View v) {
                 FastClickCheckUtil.check(v);
                 ApiDialog dialog = new ApiDialog(mActivity);
-                EventBus.getDefault().register(dialog);
                 dialog.setOnListener(new ApiDialog.OnListener() {
                     @Override
                     public void onchange(String api) {
@@ -339,7 +344,6 @@ public class ModelSettingFragment extends BaseLazyFragment {
                     @Override
                     public void onDismiss(DialogInterface dialog) {
                         ((BaseActivity) mActivity).hideSysBar();
-                        EventBus.getDefault().unregister(dialog);
                     }
                 });
                 dialog.show();
@@ -726,6 +730,7 @@ public class ModelSettingFragment extends BaseLazyFragment {
             EventBus.getDefault().register(this);
         }
         refreshApiAddress();
+        fillWebDavRemoteDrafts();
     }
 
     @Override
@@ -740,6 +745,8 @@ public class ModelSettingFragment extends BaseLazyFragment {
     public void onRemoteApiAddressChanged(RefreshEvent event) {
         if (event.type == RefreshEvent.TYPE_API_URL_CHANGE) {
             refreshApiAddress();
+        } else if (event.type == RefreshEvent.TYPE_REMOTE_INPUT_FIELD) {
+            fillWebDavRemoteDrafts();
         }
     }
 
@@ -753,6 +760,10 @@ public class ModelSettingFragment extends BaseLazyFragment {
     }
 
     private void showWebDavSettings() {
+        if (webDavSettingsDialog != null && webDavSettingsDialog.isShowing()) {
+            fillWebDavRemoteDrafts();
+            return;
+        }
         final WebDavConfig saved = WebDavConfig.load();
         LinearLayout form = new LinearLayout(mActivity);
         form.setOrientation(LinearLayout.VERTICAL);
@@ -762,11 +773,11 @@ public class ModelSettingFragment extends BaseLazyFragment {
 
         final EditText address = new EditText(mActivity);
         address.setSingleLine(true);
-        address.setHint("192.168.1.10 或完整 WebDAV 地址");
+        address.setHint("IP、域名或完整 WebDAV 地址（支持 http/https）");
         address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         address.setText(saved.baseUrl);
-        address.setTextColor(getResources().getColor(R.color.apple_tv_text_primary));
-        address.setHintTextColor(getResources().getColor(R.color.apple_tv_text_muted));
+        address.setTextColor(android.graphics.Color.BLACK);
+        address.setHintTextColor(android.graphics.Color.DKGRAY);
         form.addView(address, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -775,8 +786,8 @@ public class ModelSettingFragment extends BaseLazyFragment {
         username.setHint("WebDAV 用户名");
         username.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PERSON_NAME);
         username.setText(saved.username);
-        username.setTextColor(getResources().getColor(R.color.apple_tv_text_primary));
-        username.setHintTextColor(getResources().getColor(R.color.apple_tv_text_muted));
+        username.setTextColor(android.graphics.Color.BLACK);
+        username.setHintTextColor(android.graphics.Color.DKGRAY);
         form.addView(username, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -785,18 +796,30 @@ public class ModelSettingFragment extends BaseLazyFragment {
         password.setHint("WebDAV 密码");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         password.setText(saved.password);
-        password.setTextColor(getResources().getColor(R.color.apple_tv_text_primary));
-        password.setHintTextColor(getResources().getColor(R.color.apple_tv_text_muted));
+        password.setTextColor(android.graphics.Color.BLACK);
+        password.setHintTextColor(android.graphics.Color.DKGRAY);
         form.addView(password, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         AlertDialog dialog = new AlertDialog.Builder(mActivity)
                 .setTitle("WebDAV 设置")
-                .setMessage("填写 AList 的 WebDAV 地址。只输入 IP 时使用默认端口 5244 和 /dav 路径。")
+                .setMessage("填写 AList 的 WebDAV 地址。支持 http/https；HTTPS 未写端口使用 443，HTTP 未写端口使用 5244，并自动补齐 /dav 路径。")
                 .setView(form)
                 .setNegativeButton("取消", null)
                 .setPositiveButton("保存", null)
                 .create();
+        webDavSettingsDialog = dialog;
+        webDavAddressInput = address;
+        webDavUsernameInput = username;
+        webDavPasswordInput = password;
+        dialog.setOnDismissListener(ignored -> {
+            if (webDavSettingsDialog == dialog) {
+                webDavSettingsDialog = null;
+                webDavAddressInput = null;
+                webDavUsernameInput = null;
+                webDavPasswordInput = null;
+            }
+        });
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
                 .setOnClickListener(button -> {
                     String value = address.getText().toString().trim();
@@ -809,7 +832,29 @@ public class ModelSettingFragment extends BaseLazyFragment {
                     dialog.dismiss();
                 }));
         dialog.show();
+        fillWebDavRemoteDrafts();
         address.requestFocus();
+    }
+
+    private void fillWebDavRemoteDrafts() {
+        if (webDavSettingsDialog == null || !webDavSettingsDialog.isShowing()) {
+            return;
+        }
+        fillRemoteDraft(RemoteInputRequest.WEBDAV_URL, webDavAddressInput);
+        fillRemoteDraft(RemoteInputRequest.WEBDAV_USERNAME, webDavUsernameInput);
+        fillRemoteDraft(RemoteInputRequest.WEBDAV_PASSWORD, webDavPasswordInput);
+    }
+
+    private void fillRemoteDraft(String target, EditText input) {
+        if (input == null) {
+            return;
+        }
+        RemoteInputDrafts.PendingInput pending = RemoteInputDrafts.get().take(target);
+        if (pending != null) {
+            input.setText(pending.request.value);
+            input.setSelection(input.length());
+            pending.markFilled();
+        }
     }
 
     private void updateWebDavSummary() {
@@ -877,6 +922,9 @@ public class ModelSettingFragment extends BaseLazyFragment {
 
     @Override
     public void onDestroyView() {
+        if (webDavSettingsDialog != null) {
+            webDavSettingsDialog.dismiss();
+        }
         super.onDestroyView();
         SettingActivity.callback = null;
     }

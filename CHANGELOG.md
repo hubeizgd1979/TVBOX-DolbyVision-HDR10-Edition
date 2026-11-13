@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.3.2
+
+### 中文
+
+- WebDAV 支持 HTTPS 域名、HTTPS IPv4 和 HTTPS IPv6 地址。HTTPS 未写端口时使用 `443`，HTTP/AList 仍使用 `5244`；显式端口保持不变。
+- WebDAV 目录、视频和外挂字幕下载均保留 HTTPS 与认证信息，继续使用系统证书校验，不信任自签名证书。
+- 三端版本统一为 `0.3.2` / `versionCode 30002`，沿用正式签名并支持覆盖安装。
+
+### English
+
+- WebDAV now supports HTTPS hostnames, IPv4 addresses, and IPv6 addresses. HTTPS without an explicit port uses `443`; HTTP/AList retains `5244`, and explicit ports are preserved.
+- WebDAV listings, video playback, and external subtitle downloads retain HTTPS and authorization while using normal system certificate validation. Self-signed certificates are not trusted.
+- All three variants use `0.3.2` / `versionCode 30002` with the existing release certificate for in-place updates.
+
+## 0.3.1
+
+### 中文
+
+- 修复 HDR 已识别但色彩信号在探测到解码之间丢失的问题，保留源 PQ/HLG、色域、范围和真实静态元数据；不再将 HLG 强制写成 PQ，也不伪造固定 1000 nit 母版数据。
+- 修复 Dolby Vision 配置记录和 codec 字符串中的 profile/level 解析；存在真实 DV 硬解码器时保留原生候选，再按实际 profile/level 决定；原生路径保留 RPU 动态数据。
+- Dolby Vision 后备仅使用实际兼容基础层：Profile 7 / 8.1 为 HDR10，8.4 为 HLG，8.2 为 SDR；Profile 5 不再被误当成普通 HDR10 基础层。
+- 显示能力跟随播放窗口所属显示器更新；窗口附着及焦点恢复时重申 HDR 请求，避免手机窗口生命周期使请求丢失。亮度继续由设备控制，不将格式识别或窗口接受状态误报为实测面板输出。
+- 修复独立直播进程使用旧直播地址及空列表阻断加载的问题，使用最新已保存地址并按实际内容识别列表类型。
+- 三端统一为 `0.3.1` / `versionCode 30001`，保留既有签名、24 MiB Range 块、96 MiB 点播启播目标、192 MiB 原始缓存上限和既有音频策略。实机覆盖与验证边界见 [发布说明](0.3.1/RELEASE_NOTES.md)。
+
+### English
+
+- Fix loss of HDR color signaling between probing and decoder setup. Preserve source PQ/HLG, color standard, range, and actual static metadata instead of forcing HLG to PQ or synthesizing a fixed 1000-nit mastering descriptor.
+- Correct Dolby Vision configuration-record and codec-string profile/level parsing. Retain a native candidate when an actual DV hardware decoder exists, then select against the actual profile/level capabilities; native paths preserve dynamic RPU data.
+- Use only real compatible Dolby Vision bases: Profile 7 / 8.1 for HDR10, 8.4 for HLG, and 8.2 for SDR. Profile 5 is not treated as an ordinary HDR10 base layer.
+- Follow the playback window's current display and reassert HDR requests on attachment and focus restoration, addressing lost requests on phones. Brightness stays device-controlled; format detection or window acceptance is not reported as measured panel output.
+- Fix stale live URLs and empty-list startup blocking in the standalone live process. Use the latest saved URL and detect playlist type from content.
+- Unify all variants under `0.3.1` / `versionCode 30001`, retaining the existing certificate, 24 MiB Range chunks, 96 MiB VOD startup target, 192 MiB raw-cache ceiling, and existing audio policy. See the [release notes](0.3.1/RELEASE_NOTES.md) for verification scope.
+
+## 0.3.0
+
+### 中文
+
+- 针对已确认的 Java 堆内存耗尽，统一约束同一进程的 Range 缓存、在途下载与播放资源；原始缓存配置上限为 192 MiB，点播正常启播目标为 96 MiB，网络块保持 24 MiB。实际缓存须为样本队列、界面、字幕等保留堆空间。
+- 普通后台预取保留 96 MiB Java 堆余量，补齐最小连续缓冲时至少保留 48 MiB；若无法容纳最小缓冲，保留播放页并显示可重试内存提示，避免无限等待或自动换流。
+- 首播、恢复、Seek 和真实重新缓冲根据当前视频位置之后的连续有效数据就绪状态放行；保留可复用缓存，避免探测尾部索引被计作播放缓冲或重新缓冲反复清空已有数据。直播保持单独流式策略。
+- 退出播放与切源立即使旧回调失效并释放播放器、缓存和字幕任务；历史保存异常不再跳过资源释放。刷新首页数据源时清理旧页面堆栈，避免旧详情预览继续占用资源。
+- 视频探测改为有界字节扫描，减少二进制大字符串分配；播放期间停止反复全页模糊截图；海报内存缓存限制为 4–16 MiB。错误日志总量限制为 512 KiB 并轮转。
+- 9978 网页提供订阅、直播、WebDAV 地址、账号、密码五个独立确认项。网页只填入对应软件输入框，关闭的输入框在下次打开时填入；保存和启用仍须在软件内确认，回车不自动提交。
+- 保留本地/WebDAV 文件夹式外挂字幕选择、字幕选择恢复与独占显示。HDR 仅调整没有源样式的纯文字字幕为浅灰字/黑色描边；保留 ASS/SSA、样式文本和位图字幕的设计。
+- 保持硬件视频解码、HDR 能力路由和既有音频输出策略；独立全屏播放器使用 `:player`，32 位详情预览仍在主进程。三端统一为 `0.3.0`、`versionCode 30000`，沿用既有签名。
+
+### English
+
+- Address confirmed Java heap exhaustion by bounding Range data, in-flight downloads, and playback resources within the same process. The configured raw-cache ceiling is 192 MiB, normal VOD startup targets 96 MiB, and network chunks remain 24 MiB. The effective cache leaves heap room for sample queues, UI, subtitles, and other work.
+- Normal background prefetch leaves 96 MiB of Java heap headroom; completing the minimum contiguous runway leaves at least 48 MiB. If memory cannot support that runway, keep a retryable memory message on the playback page instead of waiting indefinitely or switching sources.
+- Gate startup, resume, seek, and genuine rebuffering on contiguous usable data ahead of the playback position. Retain reusable cache instead of counting tail-index probes as playback data or clearing downloaded data repeatedly. Live retains its separate streaming policy.
+- Invalidate old callbacks and release player, cache, and subtitle work immediately on exit or source change. History-save failures no longer skip teardown. Home-source refresh clears old page stacks to avoid retaining detail previews.
+- Replace large binary-string probes with bounded byte scans, suppress repeated full-page blur captures during playback, and bound poster memory caching to 4–16 MiB. Error-only internal logs rotate within 512 KiB total.
+- Give subscription, live, WebDAV URL, username, and password separate confirmation controls on the port 9978 page. Browser confirmation fills only the matching application input, including a pending fill when its dialog opens later. Saving and activation require in-app confirmation; Enter does not submit.
+- Retain local/WebDAV folder browsing, external-subtitle selection restoration, and exclusive subtitle rendering. HDR light-gray text/black outline applies only to unstyled text; ASS/SSA, styled text, and bitmap designs remain source-defined.
+- Preserve hardware video decoding, HDR capability routing, and audio output policy. Standalone fullscreen playback uses `:player`; 32-bit detail previews remain in the main process. All variants use `0.3.0` (`versionCode 30000`) with the existing signing certificate.
+
 ## 0.2.9.4.1
 
 ### 中文
